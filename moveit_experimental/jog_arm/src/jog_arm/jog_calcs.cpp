@@ -66,10 +66,6 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
   ros::topic::waitForMessage<sensor_msgs::JointState>(parameters_.joint_topic);
   ROS_INFO_NAMED(LOGNAME, "Received first joint msg.");
 
-  ROS_INFO_NAMED(LOGNAME, "Waiting for first command msg.");
-  ros::topic::waitForMessage<geometry_msgs::TwistStamped>(parameters_.cartesian_command_in_topic);
-  ROS_INFO_NAMED(LOGNAME, "Received first command msg.");
-
   resetVelocityFilters();
 
   jt_state_.name = joint_model_group_->getVariableNames();
@@ -148,8 +144,8 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
       ros::Duration(WHILE_LOOP_WAIT).sleep();
     }
 
-    // Assume cartesian jogging command unless the joint command has some nonzero values
-    if (zero_joint_cmd_flag)
+    // Prioritize cartesian jogging above joint jogging
+    if (!zero_cartesian_cmd_flag)
     {
       pthread_mutex_lock(&mutex);
       cartesian_deltas = shared_variables.command_deltas;
@@ -158,8 +154,7 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
       if (!cartesianJogCalcs(cartesian_deltas, shared_variables, mutex))
         continue;
     }
-    // If joint jogging command is not all zeros
-    else
+    else if (!zero_joint_cmd_flag)
     {
       pthread_mutex_lock(&mutex);
       joint_deltas = shared_variables.joint_command_deltas;
@@ -167,6 +162,11 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
 
       if (!jointJogCalcs(joint_deltas, shared_variables))
         continue;
+    }
+    else
+    {
+      original_jt_state_ = jt_state_;
+      outgoing_command_ = composeOutgoingMessage(jt_state_);
     }
 
     // Halt if the command is stale or inputs are all zero, or commands were zero
@@ -181,7 +181,7 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
       zero_joint_cmd_flag = true;
     }
 
-    bool valid_nonzero_command = !zero_cartesian_cmd_flag && !zero_joint_cmd_flag;
+    bool valid_nonzero_command = !zero_cartesian_cmd_flag || !zero_joint_cmd_flag;
 
     // Send the newest target joints
     if (!outgoing_command_.joint_names.empty())
@@ -218,7 +218,6 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
       else
         zero_velocity_count = 0;
     }
-
     loop_rate.sleep();
   }
 }
@@ -309,8 +308,7 @@ bool JogCalcs::cartesianJogCalcs(geometry_msgs::TwistStamped& cmd, JogArmShared&
   lowPassFilterVelocities(joint_vel);
   lowPassFilterPositions();
 
-  const ros::Time next_time = ros::Time::now() + ros::Duration(parameters_.publish_period);
-  outgoing_command_ = composeOutgoingMessage(jt_state_, next_time);
+  outgoing_command_ = composeOutgoingMessage(jt_state_);
 
   // If close to a collision or a singularity, decelerate
   applyVelocityScaling(shared_variables, mutex, outgoing_command_, delta_theta_,
@@ -363,8 +361,7 @@ bool JogCalcs::jointJogCalcs(const control_msgs::JointJog& cmd, JogArmShared& sh
   // update joint state with new values
   kinematic_state_->setVariableValues(jt_state_);
 
-  const ros::Time next_time = ros::Time::now() + ros::Duration(parameters_.publish_delay);
-  outgoing_command_ = composeOutgoingMessage(jt_state_, next_time);
+  outgoing_command_ = composeOutgoingMessage(jt_state_);
 
   // check if new joint state is valid
   if (!checkIfJointsWithinURDFBounds(outgoing_command_))
@@ -431,12 +428,11 @@ void JogCalcs::lowPassFilterVelocities(const Eigen::VectorXd& joint_vel)
   }
 }
 
-trajectory_msgs::JointTrajectory JogCalcs::composeOutgoingMessage(sensor_msgs::JointState& joint_state,
-                                                                  const ros::Time& stamp) const
+trajectory_msgs::JointTrajectory JogCalcs::composeOutgoingMessage(sensor_msgs::JointState& joint_state) const
 {
   trajectory_msgs::JointTrajectory new_jt_traj;
   new_jt_traj.header.frame_id = parameters_.planning_frame;
-  new_jt_traj.header.stamp = stamp;
+  new_jt_traj.header.stamp = ros::Time::now();
   new_jt_traj.joint_names = joint_state.name;
 
   trajectory_msgs::JointTrajectoryPoint point;
@@ -635,7 +631,9 @@ void JogCalcs::halt(trajectory_msgs::JointTrajectory& jt_traj)
   {
     // For position-controlled robots, can reset the joints to a known, good state
     if (parameters_.publish_joint_positions)
+      {
       jt_traj.points[0].positions[i] = original_jt_state_.position[i];
+      }
 
     // For velocity-controlled robots, stop
     if (parameters_.publish_joint_velocities)
