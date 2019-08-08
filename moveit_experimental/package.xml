@@ -16,8 +16,8 @@
   <depend>rosparam_shortcuts</depend>
   <depend>spacenav_node</depend>
   <depend>tf2_ros</depend>
+  <depend>moveit_resources</depend>
 
-  <test_depend>moveit_resources</test_depend>
   <test_depend>ros_pytest</test_depend>
   <test_depend>rostest</test_depend>
 
