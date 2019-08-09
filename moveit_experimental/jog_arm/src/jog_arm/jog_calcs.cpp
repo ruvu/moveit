@@ -73,6 +73,8 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
   jt_state_.position.resize(num_joints_);
   jt_state_.velocity.resize(num_joints_);
   jt_state_.effort.resize(num_joints_);
+  outgoing_command_ = composeOutgoingMessage(jt_state_);
+
   // A map for the indices of incoming joint commands
   for (std::size_t i = 0; i < jt_state_.name.size(); ++i)
   {
@@ -124,11 +126,43 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
     pthread_mutex_lock(&mutex);
     bool zero_cartesian_cmd_flag = shared_variables.zero_cartesian_cmd_flag;
     bool zero_joint_cmd_flag = shared_variables.zero_joint_cmd_flag;
-    pthread_mutex_unlock(&mutex);
+    bool stale_command = shared_variables.command_is_stale;
 
-    if (zero_cartesian_cmd_flag && zero_joint_cmd_flag)
-      // Reset low-pass filters
-      resetVelocityFilters();
+    if (stale_command)
+    {
+      ROS_INFO_THROTTLE(1, "Command stale");
+      if (zero_cartesian_cmd_flag && zero_joint_cmd_flag && zero_velocity_count <= parameters_.num_halt_msgs_to_publish)
+      {
+        halt(outgoing_command_);
+        shared_variables.outgoing_command = outgoing_command_;
+        shared_variables.ok_to_publish = true;
+        ++zero_velocity_count
+        ROS_INFO("Publish few");
+      }
+      else
+        if (shared_variables.ok_to_publish)
+        {
+            shared_variables.ok_to_publish = false;
+            resetVelocityFilters();
+        }
+        loop_rate.sleep();
+        pthread_mutex_unlock(&mutex);
+        ROS_INFO_THROTTLE(1, "Don't publish");
+        continue;
+    }
+    else
+    {
+      zero_velocity_count = 0
+      shared_variables.ok_to_publish = true;
+      ROS_INFO_THROTTLE(1, "Publish normal");
+      if (zero_cartesian_cmd_flag && zero_joint_cmd_flag)
+      {
+        halt(outgoing_command_);
+        shared_variables.outgoing_command = outgoing_command_;
+        shared_variables.ok_to_publish = true;
+      }
+    }
+    pthread_mutex_unlock(&mutex);
 
     // Pull data from the shared variables.
     pthread_mutex_lock(&mutex);
@@ -163,61 +197,7 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
       if (!jointJogCalcs(joint_deltas, shared_variables))
         continue;
     }
-    else
-    {
-      original_jt_state_ = jt_state_;
-      outgoing_command_ = composeOutgoingMessage(jt_state_);
-    }
 
-    // Halt if the command is stale or inputs are all zero, or commands were zero
-    pthread_mutex_lock(&mutex);
-    bool stale_command = shared_variables.command_is_stale;
-    pthread_mutex_unlock(&mutex);
-
-    if (stale_command || (zero_cartesian_cmd_flag && zero_joint_cmd_flag))
-    {
-      halt(outgoing_command_);
-      zero_cartesian_cmd_flag = true;
-      zero_joint_cmd_flag = true;
-    }
-
-    bool valid_nonzero_command = !zero_cartesian_cmd_flag || !zero_joint_cmd_flag;
-
-    // Send the newest target joints
-    if (!outgoing_command_.joint_names.empty())
-    {
-      pthread_mutex_lock(&mutex);
-      // If everything normal, share the new traj to be published
-      if (valid_nonzero_command)
-      {
-        shared_variables.outgoing_command = outgoing_command_;
-        shared_variables.ok_to_publish = true;
-      }
-      // Skip the jogging publication if all inputs have been zero for several cycles in a row.
-      // num_halt_msgs_to_publish == 0 signifies that we shoud keep republishing forever.
-      else if ((parameters_.num_halt_msgs_to_publish != 0) &&
-               (zero_velocity_count > parameters_.num_halt_msgs_to_publish))
-      {
-        shared_variables.ok_to_publish = false;
-      }
-      else
-      {
-        shared_variables.outgoing_command = outgoing_command_;
-        shared_variables.ok_to_publish = true;
-      }
-      pthread_mutex_unlock(&mutex);
-
-      // Store last zero-velocity message flag to prevent superfluous warnings.
-      // Cartesian and joint commands must both be zero.
-      if (zero_cartesian_cmd_flag && zero_joint_cmd_flag)
-      {
-        // Avoid overflow
-        if (zero_velocity_count < INT_MAX)
-          ++zero_velocity_count;
-      }
-      else
-        zero_velocity_count = 0;
-    }
     loop_rate.sleep();
   }
 }
