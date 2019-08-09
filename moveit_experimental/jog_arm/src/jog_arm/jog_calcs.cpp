@@ -631,9 +631,7 @@ void JogCalcs::halt(trajectory_msgs::JointTrajectory& jt_traj)
   {
     // For position-controlled robots, can reset the joints to a known, good state
     if (parameters_.publish_joint_positions)
-      {
       jt_traj.points[0].positions[i] = original_jt_state_.position[i];
-      }
 
     // For velocity-controlled robots, stop
     if (parameters_.publish_joint_velocities)
