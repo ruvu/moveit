@@ -96,10 +96,11 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
     pthread_mutex_unlock(&mutex);
     ros::Duration(WHILE_LOOP_WAIT).sleep();
   }
-  for (std::size_t i = 0; i < num_joints_; ++i)
-    position_filters_[i].reset(jt_state_.position[i]);
 
-  // Wait for the first jogging cmd.
+  pthread_mutex_lock(&mutex);
+  resetPositionFilters(shared_variables.joints);
+  pthread_mutex_unlock(&mutex);
+
   // Store it in a class member for further calcs, then free up the shared variable again.
   geometry_msgs::TwistStamped cartesian_deltas;
   control_msgs::JointJog joint_deltas;
@@ -127,40 +128,34 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
     bool zero_cartesian_cmd_flag = shared_variables.zero_cartesian_cmd_flag;
     bool zero_joint_cmd_flag = shared_variables.zero_joint_cmd_flag;
     bool stale_command = shared_variables.command_is_stale;
+    original_jt_state_ = jt_state_;
 
     if (stale_command)
     {
-      ROS_INFO_THROTTLE(1, "Command stale");
       if (zero_cartesian_cmd_flag && zero_joint_cmd_flag && zero_velocity_count <= parameters_.num_halt_msgs_to_publish)
       {
         halt(outgoing_command_);
         shared_variables.outgoing_command = outgoing_command_;
         shared_variables.ok_to_publish = true;
-        ++zero_velocity_count
-        ROS_INFO("Publish few");
+        ++zero_velocity_count;
       }
       else
+      {
         if (shared_variables.ok_to_publish)
         {
             shared_variables.ok_to_publish = false;
             resetVelocityFilters();
         }
-        loop_rate.sleep();
         pthread_mutex_unlock(&mutex);
-        ROS_INFO_THROTTLE(1, "Don't publish");
+        loop_rate.sleep();
         continue;
+      }
     }
     else
     {
-      zero_velocity_count = 0
-      shared_variables.ok_to_publish = true;
-      ROS_INFO_THROTTLE(1, "Publish normal");
-      if (zero_cartesian_cmd_flag && zero_joint_cmd_flag)
-      {
-        halt(outgoing_command_);
-        shared_variables.outgoing_command = outgoing_command_;
-        shared_variables.ok_to_publish = true;
-      }
+      zero_velocity_count = 0;
+      if (!shared_variables.ok_to_publish)
+        resetPositionFilters(shared_variables.joints);
     }
     pthread_mutex_unlock(&mutex);
 
@@ -197,6 +192,13 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
       if (!jointJogCalcs(joint_deltas, shared_variables))
         continue;
     }
+
+    pthread_mutex_lock(&mutex);
+    shared_variables.ok_to_publish = true;
+    if (zero_cartesian_cmd_flag && zero_joint_cmd_flag)
+      halt(outgoing_command_);
+    shared_variables.outgoing_command = outgoing_command_;
+    pthread_mutex_unlock(&mutex);
 
     loop_rate.sleep();
   }
@@ -268,7 +270,6 @@ bool JogCalcs::cartesianJogCalcs(geometry_msgs::TwistStamped& cmd, JogArmShared&
   const Eigen::VectorXd delta_x = scaleCartesianCommand(cmd);
 
   kinematic_state_->setVariableValues(jt_state_);
-  original_jt_state_ = jt_state_;
 
   // Convert from cartesian commands to joint commands
   jacobian_ = kinematic_state_->getJacobian(joint_model_group_);
@@ -327,7 +328,6 @@ bool JogCalcs::jointJogCalcs(const control_msgs::JointJog& cmd, JogArmShared& sh
   const Eigen::VectorXd delta = scaleJointCommand(cmd);
 
   kinematic_state_->setVariableValues(jt_state_);
-  original_jt_state_ = jt_state_;
 
   if (!addJointIncrements(jt_state_, delta))
     return false;
@@ -624,6 +624,15 @@ void JogCalcs::resetVelocityFilters()
 {
   for (std::size_t i = 0; i < num_joints_; ++i)
     velocity_filters_[i].reset(0);  // Zero velocity
+}
+
+// Reset the data stored in filters so the trajectory won't jump when jogging is resumed.
+void JogCalcs::resetPositionFilters(sensor_msgs::JointState& joint_state)
+{
+  for (std::size_t i = 0; i < num_joints_; ++i)
+  {
+    position_filters_[i].reset(joint_state.position[i]);
+  }
 }
 
 // Parse the incoming joint msg for the joints of our MoveGroup
