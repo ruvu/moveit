@@ -130,16 +130,9 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
     bool stale_command = shared_variables.command_is_stale;
     original_jt_state_ = jt_state_;
 
-    if (stale_command)
+    if (stale_command || (zero_cartesian_cmd_flag && zero_joint_cmd_flag))
     {
-      if (zero_cartesian_cmd_flag && zero_joint_cmd_flag && zero_velocity_count <= parameters_.num_halt_msgs_to_publish)
-      {
-        halt(outgoing_command_);
-        shared_variables.outgoing_command = outgoing_command_;
-        shared_variables.ok_to_publish = true;
-        ++zero_velocity_count;
-      }
-      else
+      if (zero_velocity_count > parameters_.num_halt_msgs_to_publish)
       {
         if (shared_variables.ok_to_publish)
         {
@@ -150,6 +143,8 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
         loop_rate.sleep();
         continue;
       }
+      else
+        ++zero_velocity_count;
     }
     else
     {
@@ -174,7 +169,7 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
     }
 
     // Prioritize cartesian jogging above joint jogging
-    if (!zero_cartesian_cmd_flag)
+    if (!zero_cartesian_cmd_flag && ! stale_command)
     {
       pthread_mutex_lock(&mutex);
       cartesian_deltas = shared_variables.command_deltas;
@@ -183,7 +178,7 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
       if (!cartesianJogCalcs(cartesian_deltas, shared_variables, mutex))
         continue;
     }
-    else if (!zero_joint_cmd_flag)
+    else if (!zero_joint_cmd_flag && ! stale_command)
     {
       pthread_mutex_lock(&mutex);
       joint_deltas = shared_variables.joint_command_deltas;
@@ -195,7 +190,7 @@ JogCalcs::JogCalcs(const JogArmParameters& parameters, JogArmShared& shared_vari
 
     pthread_mutex_lock(&mutex);
     shared_variables.ok_to_publish = true;
-    if (zero_cartesian_cmd_flag && zero_joint_cmd_flag)
+    if (stale_command || (zero_cartesian_cmd_flag && zero_joint_cmd_flag))
       halt(outgoing_command_);
     shared_variables.outgoing_command = outgoing_command_;
     pthread_mutex_unlock(&mutex);
